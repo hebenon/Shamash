@@ -1,6 +1,7 @@
 __author__ = 'bcarson'
 
-import calendar
+import calendar,time
+from datetime import datetime, timedelta
 
 import os
 import xively
@@ -8,7 +9,6 @@ import xively
 import numpy
 from scipy.integrate import simps
 
-from datetime import datetime, timedelta
 
 FEED_ID = os.environ["XIVELY_FEED_ID"]
 XIVELY_API_KEY = os.environ["XIVELY_API_KEY"]
@@ -19,21 +19,7 @@ threshold = 100
 
 # A precondition on this is that the datapoints are filtered by the minimum value threshold.
 # Calculated as the area under the curve.
-def calculate_watthours(datapoints):
-    num_points = len(datapoints)
-
-    # Add the last point in, as a whole value.
-    trapezoid_total = float(datapoints[num_points - 1].value)
-
-    for i in range(0, num_points - 2):
-        trapezoid_total += (float(datapoints[i].value) + float(datapoints[i + 1].value)) / 2.0
-
-    # Multiply the total by the x co-ordinate as a percentage of the hour.
-    sample_percentage_of_hour = 15.0/60.0
-
-    return trapezoid_total * sample_percentage_of_hour
-
-def calculate_simps_watthours(datapoints):
+def calculate_area_under_curve(datapoints):
     num_points = len(datapoints)
 
     start_point = calendar.timegm(datapoints[0].at.timetuple())
@@ -43,13 +29,13 @@ def calculate_simps_watthours(datapoints):
 
     return simps(yValues, xValues, even='avg')
 
-if __name__ == "__main__":
-    #start_time = datetime.utcnow() - timedelta(days=1)
-    #end_time = datetime.utcnow()
+def get_maximum_datapoint(dataseries):
+    return reduce(lambda x,y: x if float(x.value) > float(y.value) else y, dataseries )
 
+if __name__ == "__main__":
     UTC_OFFSET_TIMEDELTA = datetime.utcnow() - datetime.now()
 
-    start_time = datetime(2015,5,29,0,0,0) - UTC_OFFSET_TIMEDELTA
+    start_time = datetime(2015,5,29,0,0,0) + UTC_OFFSET_TIMEDELTA
     end_time = start_time + timedelta(days=1)
 
     print("Retrieving feed data between %s and %s" % (str(start_time), str(end_time)))
@@ -58,28 +44,29 @@ if __name__ == "__main__":
 
     temperature_datastream = feed.datastreams.get("0", start=start_time, end=end_time)
     watts_datastream = feed.datastreams.get("1", start=start_time, end=end_time)
-    mystery_datastream = feed.datastreams.get("2", start=start_time, end=end_time)
+    consumed_datastream = feed.datastreams.get("2", start=start_time, end=end_time)
 
-    print("Temperature: %s" % str(temperature_datastream.current_value))
-    for point in temperature_datastream.datapoints:
-        # Convert from UTC time to local time
-        timestamp = calendar.timegm(point.at.timetuple())
-        print("%s: %s" % (str(datetime.fromtimestamp(timestamp)), str(point.value)))
+    # Filter the data points, as the device is a flow meter (i.e. when not generating power, it is measuring draw).
+    filtered_watts_points = [point for point in watts_datastream.datapoints if float(point.value) > threshold]
 
-    print("Watts: %s" % str(watts_datastream.current_value))
-    for point in watts_datastream.datapoints:
-        # Convert from UTC time to local time
-        timestamp = calendar.timegm(point.at.timetuple())
-        print("%s: %s" % (str(datetime.fromtimestamp(timestamp)), str(point.value)))
+    # Find the point of maximum power generation.
+    max_watts_point = get_maximum_datapoint(filtered_watts_points)
+    max_watts_time = datetime.fromtimestamp(time.mktime(max_watts_point.at.timetuple())) - UTC_OFFSET_TIMEDELTA
 
-    print("Mystery: %s" % str(mystery_datastream.current_value))
-    for point in mystery_datastream.datapoints:
-        # Convert from UTC time to local time
-        timestamp = calendar.timegm(point.at.timetuple())
-        print("%s: %s" % (str(datetime.fromtimestamp(timestamp)), str(point.value)))
+    # Find the point of the highest temperature.
+    max_temperature_point = get_maximum_datapoint(temperature_datastream.datapoints)
+    max_temperature_time = datetime.fromtimestamp(time.mktime(max_temperature_point.at.timetuple())) - UTC_OFFSET_TIMEDELTA
 
-    watt_hours = calculate_simps_watthours([point for point in mystery_datastream.datapoints if float(point.value) > threshold])
-    print("Watt hours for %s to %s: %f" % (start_time, end_time, watt_hours))
+    # Process power consumption.
+    max_consumption_point = get_maximum_datapoint(consumed_datastream.datapoints)
+    max_consumption_time = datetime.fromtimestamp(time.mktime(max_consumption_point.at.timetuple())) - UTC_OFFSET_TIMEDELTA
+    total_consumption = sum(float(point.value) for point in consumed_datastream.datapoints)
 
-    watt_hours = calculate_watthours([point for point in mystery_datastream.datapoints if float(point.value) > threshold])
-    print("Watt hours for %s to %s: %f" % (start_time, end_time, watt_hours))
+    watt_hours = calculate_area_under_curve(filtered_watts_points) / 1000
+
+    print("Watt hours for %s to %s: %.2f kWh" % (start_time - UTC_OFFSET_TIMEDELTA, end_time - UTC_OFFSET_TIMEDELTA, watt_hours))
+    print("Maximum power generation was %s W at %s" % (max_watts_point.value, max_watts_time))
+    print("Maximum temperature was %s degrees at %s" % (max_temperature_point.value, max_temperature_time))
+    print("Total power consumption was %.2f (maximum: %.2f at %s)" % (total_consumption, float(max_consumption_point.value), max_consumption_time))
+
+
