@@ -3,19 +3,29 @@ __author__ = 'bcarson'
 import calendar,time
 from datetime import datetime, timedelta
 
-import os
+import os,sys
 import xively
+import requests
 
 import numpy
 from scipy.integrate import simps
 
 
-FEED_ID = os.environ["XIVELY_FEED_ID"]
+# Input settings
+XIVELY_FEED_ID = os.environ["XIVELY_FEED_ID"]
 XIVELY_API_KEY = os.environ["XIVELY_API_KEY"]
 
 xively_api = xively.XivelyAPIClient(XIVELY_API_KEY)
 
-threshold = 100
+# Data retrieval interval, in seconds
+INTERVAL = 300
+
+# Output settings
+PVOUTPUT_SYSTEM_ID = os.environ["PVOUTPUT_SYSTEM_ID"]
+PVOUTPUT_API_KEY = os.environ["PVOUTPUT_API_KEY"]
+PVOUTPUT_UPLOAD_ENDPOINT = "http://pvoutput.org/service/r2/addoutput.jsp"
+
+THRESHOLD = 110
 
 # A precondition on this is that the datapoints are filtered by the minimum value threshold.
 # Calculated as the area under the curve.
@@ -32,22 +42,48 @@ def calculate_area_under_curve(datapoints):
 def get_maximum_datapoint(dataseries):
     return reduce(lambda x,y: x if float(x.value) > float(y.value) else y, dataseries )
 
-if __name__ == "__main__":
-    UTC_OFFSET_TIMEDELTA = datetime.utcnow() - datetime.now()
+def upload_pvoutput_data( date, max_watts, max_watts_time, watt_hours_generated, consumption ):
+    headers = { "X-Pvoutput-Apikey" : PVOUTPUT_API_KEY,
+                "X-Pvoutput-SystemId": PVOUTPUT_SYSTEM_ID }
 
-    start_time = datetime(2015,5,29,0,0,0) + UTC_OFFSET_TIMEDELTA
+    parameters = { "d": date.strftime("%Y%m%d"),
+                   "g": str(watt_hours_generated),
+                   "pp": str(max_watts),
+                   "pt": max_watts_time.strftime("%H:%M"),
+                   "c" : str(consumption) }
+
+    for i in range(0,5):
+        result = requests.post(PVOUTPUT_UPLOAD_ENDPOINT, data=parameters, headers=headers)
+        print("PV Output response: %s" % result.text)
+        if result.status_code == requests.codes.ok:
+            return True
+        else:
+            sleep(30)
+
+    return False
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        now = datetime.now() - timedelta(days=1)
+        start_time = datetime(now.year, now.month, now.day)
+    else:
+        start_time = datetime.strptime(sys.argv[1], "%Y-%m-%d")
+
+
+    UTC_OFFSET_TIMEDELTA = datetime.utcnow() - datetime.now()
+    start_time += UTC_OFFSET_TIMEDELTA
     end_time = start_time + timedelta(days=1)
 
     print("Retrieving feed data between %s and %s" % (str(start_time), str(end_time)))
 
-    feed = xively_api.feeds.get(FEED_ID, start=start_time, end=end_time)
+    feed = xively_api.feeds.get(XIVELY_FEED_ID, start = start_time, end = end_time)
 
-    temperature_datastream = feed.datastreams.get("0", start=start_time, end=end_time)
-    watts_datastream = feed.datastreams.get("1", start=start_time, end=end_time)
-    consumed_datastream = feed.datastreams.get("2", start=start_time, end=end_time)
+    temperature_datastream = feed.datastreams.get("0", start = start_time, end = end_time, limit = 1000, interval_type = "discrete", interval = INTERVAL)
+    watts_datastream = feed.datastreams.get("1", start = start_time, end = end_time, limit = 1000, interval_type = "discrete", interval = INTERVAL)
+    consumed_datastream = feed.datastreams.get("2", start = start_time, end = end_time, limit = 1000, interval_type = "discrete", interval = INTERVAL)
 
     # Filter the data points, as the device is a flow meter (i.e. when not generating power, it is measuring draw).
-    filtered_watts_points = [point for point in watts_datastream.datapoints if float(point.value) > threshold]
+    filtered_watts_points = [point for point in watts_datastream.datapoints if float(point.value) > THRESHOLD]
 
     # Find the point of maximum power generation.
     max_watts_point = get_maximum_datapoint(filtered_watts_points)
@@ -60,13 +96,16 @@ if __name__ == "__main__":
     # Process power consumption.
     max_consumption_point = get_maximum_datapoint(consumed_datastream.datapoints)
     max_consumption_time = datetime.fromtimestamp(time.mktime(max_consumption_point.at.timetuple())) - UTC_OFFSET_TIMEDELTA
-    total_consumption = sum(float(point.value) for point in consumed_datastream.datapoints)
+    total_consumption = calculate_area_under_curve(consumed_datastream.datapoints)
 
-    watt_hours = calculate_area_under_curve(filtered_watts_points) / 1000
+    watt_hours = calculate_area_under_curve(filtered_watts_points)
 
-    print("Watt hours for %s to %s: %.2f kWh" % (start_time - UTC_OFFSET_TIMEDELTA, end_time - UTC_OFFSET_TIMEDELTA, watt_hours))
+    print("Watt hours for %s to %s: %.2f kWh" % (start_time - UTC_OFFSET_TIMEDELTA, end_time - UTC_OFFSET_TIMEDELTA, watt_hours / 1000))
     print("Maximum power generation was %s W at %s" % (max_watts_point.value, max_watts_time))
     print("Maximum temperature was %s degrees at %s" % (max_temperature_point.value, max_temperature_time))
-    print("Total power consumption was %.2f (maximum: %.2f at %s)" % (total_consumption, float(max_consumption_point.value), max_consumption_time))
+    print("Total power consumption was %.2f kWh (maximum: %.2f W at %s)" % (total_consumption / 1000, float(max_consumption_point.value), max_consumption_time))
+
+    if not upload_pvoutput_data( start_time + timedelta(hours=12) - UTC_OFFSET_TIMEDELTA, int(max_watts_point.value), max_watts_time, int(watt_hours), int(total_consumption) ):
+        sys.exit(1)
 
 
