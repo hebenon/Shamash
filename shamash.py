@@ -25,6 +25,8 @@ PVOUTPUT_SYSTEM_ID = os.environ["PVOUTPUT_SYSTEM_ID"]
 PVOUTPUT_API_KEY = os.environ["PVOUTPUT_API_KEY"]
 PVOUTPUT_UPLOAD_ENDPOINT = "http://pvoutput.org/service/r2/addoutput.jsp"
 
+UTC_OFFSET_TIMEDELTA = datetime.utcnow() - datetime.now()
+
 THRESHOLD = 110
 
 # A precondition on this is that the datapoints are filtered by the minimum value threshold.
@@ -62,16 +64,8 @@ def upload_pvoutput_data( date, max_watts, max_watts_time, watt_hours_generated,
 
     return False
 
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        now = datetime.now() - timedelta(days=1)
-        start_time = datetime(now.year, now.month, now.day)
-    else:
-        start_time = datetime.strptime(sys.argv[1], "%Y-%m-%d")
-
-
-    UTC_OFFSET_TIMEDELTA = datetime.utcnow() - datetime.now()
-    start_time += UTC_OFFSET_TIMEDELTA
+def process_day(day):
+    start_time = day + UTC_OFFSET_TIMEDELTA
     end_time = start_time + timedelta(days=1)
 
     print("Retrieving feed data between %s and %s" % (str(start_time), str(end_time)))
@@ -105,7 +99,20 @@ if __name__ == "__main__":
     print("Maximum temperature was %s degrees at %s" % (max_temperature_point.value, max_temperature_time))
     print("Total power consumption was %.2f kWh (maximum: %.2f W at %s)" % (total_consumption / 1000, float(max_consumption_point.value), max_consumption_time))
 
-    if not upload_pvoutput_data( start_time + timedelta(hours=12) - UTC_OFFSET_TIMEDELTA, int(max_watts_point.value), max_watts_time, int(watt_hours), int(total_consumption) ):
-        sys.exit(1)
+    return upload_pvoutput_data( start_time + timedelta(hours=12) - UTC_OFFSET_TIMEDELTA, int(max_watts_point.value), max_watts_time, int(watt_hours), int(total_consumption))
 
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        now = datetime.now() - timedelta(days=1)
+        start_date = datetime(now.year, now.month, now.day)
+        end_date = start_date + timedelta(days=1)
+    else:
+        start_date = datetime.strptime(sys.argv[1], "%Y-%m-%d")
+        end_date = datetime.strptime(sys.argv[2], "%Y-%m-%d")
+
+    number_of_days = (end_date - start_date).days
+
+    for i in xrange(0, number_of_days):
+        process_day(start_date)
+        start_date += timedelta(days=1)
 
